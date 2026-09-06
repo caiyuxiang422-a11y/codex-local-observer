@@ -1,0 +1,196 @@
+name: Release macOS
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: macos-14
+    timeout-minutes: 60
+    outputs:
+      trusted: ${{ steps.trust.outputs.trusted }}
+    env:
+      TAURI_BUILD_TARGET: universal-apple-darwin
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up stable Rust and universal targets
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Verify release version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          package_version="$(node -p 'require("./package.json").version')"
+          cargo_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' src-tauri/Cargo.toml | head -1)"
+          tauri_version="$(node -p 'require("./src-tauri/tauri.conf.json").version')"
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [[ "$package_version" != "$cargo_version" || "$package_version" != "$tauri_version" || "$package_version" != "$tag_version" ]]; then
+            echo "Version mismatch: package=$package_version cargo=$cargo_version tauri=$tauri_version tag=$tag_version" >&2
+            exit 1
+          fi
+
+      - name: Verify tag belongs to the default branch
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          default_ref="refs/remotes/origin/$DEFAULT_BRANCH"
+          if ! git show-ref --verify --quiet "$default_ref"; then
+            echo "Default branch ref is unavailable: $default_ref" >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "$default_ref"; then
+            echo "Release tag commit is not contained in $DEFAULT_BRANCH." >&2
+            exit 1
+          fi
+
+      - name: Install JavaScript dependencies
+        run: npm ci
+
+      - name: Verify source
+        run: |
+          npm run check
+          cargo fmt --manifest-path src-tauri/Cargo.toml --check
+          cargo test --locked --manifest-path src-tauri/Cargo.toml
+          cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: Check Apple credential completeness
+        id: apple
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          values=(
+            "$APPLE_CERTIFICATE"
+            "$APPLE_CERTIFICATE_PASSWORD"
+            "$APPLE_SIGNING_IDENTITY"
+            "$APPLE_ID"
+            "$APPLE_PASSWORD"
+            "$APPLE_TEAM_ID"
+          )
+          present=0
+          for value in "${values[@]}"; do
+            [[ -n "$value" ]] && present=$((present + 1))
+          done
+          if [[ "$present" == "0" ]]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "Apple credentials are absent. The build will be retained only as an untrusted diagnostic artifact."
+          elif [[ "$present" != "6" ]]; then
+            echo "Apple signing/notarization secrets are only partially configured." >&2
+            exit 1
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Import Developer ID certificate
+        if: steps.apple.outputs.configured == 'true'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          certificate_path="$RUNNER_TEMP/developer-id.p12"
+          keychain_path="$RUNNER_TEMP/codex-local-observer.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$certificate_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain_path"
+          security list-keychain -d user -s "$keychain_path"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain_path"
+
+      - name: Package macOS app
+        env:
+          SKIP_CHECKS: "1"
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: npm run package:macos
+
+      - name: Verify public-distribution trust
+        id: trust
+        run: |
+          metadata="$(find release -maxdepth 1 -name '*.metadata.txt' -print -quit)"
+          if [[ -z "$metadata" ]] || ! grep -q '^Public distribution ready: yes$' "$metadata"; then
+            echo "trusted=false" >> "$GITHUB_OUTPUT"
+            echo "The app did not pass signing, notarization, Gatekeeper, and binary-license gates. It will not be published." >&2
+            exit 1
+          fi
+          echo "trusted=true" >> "$GITHUB_OUTPUT"
+
+      - name: Retain failed or unsigned package for maintainer diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: UNTRUSTED-NOT-FOR-END-USERS
+          path: release/
+          if-no-files-found: ignore
+          retention-days: 3
+
+      - name: Retain verified release assets
+        if: steps.trust.outputs.trusted == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: TRUSTED-RELEASE-ASSETS
+          path: release/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/') && needs.package.outputs.trusted == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Download verified assets and create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir release
+          gh run download "$GITHUB_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name TRUSTED-RELEASE-ASSETS \
+            --dir release
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            release/*.app.zip \
+            release/*.app.zip.sha256 \
+            release/*.metadata.txt \
+            release/LICENSE \
+            release/THIRD_PARTY_NOTICES.md \
+            release/THIRD_PARTY_LICENSES.txt \
+            --verify-tag \
+            --generate-notes \
+            --title "Codex Local Observer $GITHUB_REF_NAME"

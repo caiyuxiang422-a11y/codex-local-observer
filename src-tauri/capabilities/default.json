@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-window",
+  "description": "The main local task monitor and its read-only sticky widget",
+  "windows": ["main", "widget", "widget-crown"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-outer-position",
+    "core:window:allow-outer-size",
+    "core:window:allow-cursor-position",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-title",
+    "core:window:allow-set-position",
+    "core:window:allow-set-size"
+  ]
+}

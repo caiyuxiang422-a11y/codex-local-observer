@@ -1,0 +1,10 @@
+.brand-logo {
+  display: block;
+  flex: 0 0 auto;
+  width: var(--brand-logo-size);
+  height: var(--brand-logo-size);
+  object-fit: contain;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+

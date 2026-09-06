@@ -1,0 +1,56 @@
+[package]
+name = "codex-local-observer"
+version = "0.1.0"
+description = "Local-first task monitor for Codex CLI"
+authors = ["Codex Local Observer contributors"]
+edition = "2021"
+license = "MIT"
+
+[lib]
+name = "codex_local_observer_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+libc = "0.2"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sysinfo = { version = "0.39.6", default-features = false, features = ["system", "disk", "network"] }
+tauri = { version = "2", features = ["macos-private-api"] }
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+battery = "0.7.8"
+block2 = "0.6.2"
+objc2 = { version = "0.6.4", default-features = false, features = ["std"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "NSResponder",
+  "NSScreen",
+  "NSColor",
+  "NSBezierPath",
+  "NSEvent",
+  "NSGraphics",
+  "NSImage",
+  "NSView",
+  "NSWindow",
+  "NSVisualEffectView",
+  "block2",
+  "objc2-core-foundation",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "NSGeometry",
+  "objc2-core-foundation",
+] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "CGWindowLevel",
+] }
+# Reuse Tauri's small, MIT/Apache-2.0 AppKit vibrancy helper.  It inserts a
+# tagged NSVisualEffectView below the WKWebView and provides a safe rounded
+# fallback on macOS versions that do not have the newer NSGlassEffectView.
+window-vibrancy = "0.6.0"

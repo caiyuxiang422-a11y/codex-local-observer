@@ -1,0 +1,26 @@
+node_modules/
+dist/
+release/
+coverage/
+.DS_Store
+src-tauri/target/
+src-tauri/gen/
+*.log
+
+# Local configuration and signing material must never enter the repository.
+.env
+.env.*
+!.env.example
+*.p12
+*.cer
+*.mobileprovision
+*.key
+.apple-signing/
+
+# Local editor state.
+.idea/
+.vscode/
+
+# Local Codex collaboration rules. The public project contract is documented
+# in README, CONTRIBUTING, SECURITY, and the architecture decision records.
+agent.md

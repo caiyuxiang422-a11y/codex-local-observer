@@ -1,0 +1,20 @@
+Codex Local Observer binary dependency license inventory
+
+Review-Status: incomplete
+Reviewed-For-Version: none
+
+This placeholder is deliberately included in local verification bundles.
+It is not a complete binary-distribution license report and must not be marked
+complete merely to pass automation.
+
+Before publishing a macOS binary, generate a license inventory from the exact
+package-lock.json and src-tauri/Cargo.lock used for that version. Include all
+required license texts and copyright notices, review the result, then replace
+this file with the reviewed report and set these two exact headers:
+
+Review-Status: complete
+Reviewed-For-Version: <package version>
+
+Source-only publication is not blocked by this incomplete binary inventory.
+See THIRD_PARTY_NOTICES.md and RELEASE.md for the current dependency overview
+and release policy.
