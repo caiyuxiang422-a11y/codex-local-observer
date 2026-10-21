@@ -53,4 +53,4 @@ objc2-core-graphics = { version = "0.3.2", default-features = false, features = 
 # Reuse Tauri's small, MIT/Apache-2.0 AppKit vibrancy helper.  It inserts a
 # tagged NSVisualEffectView below the WKWebView and provides a safe rounded
 # fallback on macOS versions that do not have the newer NSGlassEffectView.
-window-vibrancy = "0.6.0"
+window-vibrancy = "0.8.1"
