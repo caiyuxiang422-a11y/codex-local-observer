@@ -66,6 +66,21 @@ pub struct RateLimitBucket {
     pub has_credits: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secondary: Option<RateLimitWindow>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RateLimitWindow {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub used_percent: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remaining_percent: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_duration_mins: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -189,7 +204,7 @@ fn read_project_usage(requested_path: &str) -> Result<ProjectUsageSnapshot, Stri
                 "clientInfo": {
                     "name": "codex_local_observer",
                     "title": "Codex Local Observer",
-                    "version": "0.1.0"
+                    "version": env!("CARGO_PKG_VERSION")
                 }
             }
         }),
@@ -837,7 +852,7 @@ fn send_requests(stdin: &mut impl Write) -> Result<(), String> {
                 "clientInfo": {
                     "name": "codex_local_observer",
                     "title": "Codex Local Observer",
-                    "version": "0.1.0"
+                    "version": env!("CARGO_PKG_VERSION")
                 }
             }
         }),
@@ -1100,6 +1115,20 @@ fn parse_bucket(fallback_id: &str, value: &Value) -> RateLimitBucket {
             .get("planType")
             .and_then(Value::as_str)
             .map(str::to_string),
+        secondary: value
+            .get("secondary")
+            .filter(|window| window.is_object())
+            .map(parse_window),
+    }
+}
+
+fn parse_window(value: &Value) -> RateLimitWindow {
+    let used_percent = bounded_percent(value.get("usedPercent"));
+    RateLimitWindow {
+        used_percent,
+        remaining_percent: used_percent.map(|used| 100 - used),
+        window_duration_mins: value.get("windowDurationMins").and_then(Value::as_u64),
+        resets_at: value.get("resetsAt").and_then(Value::as_u64),
     }
 }
 
@@ -1245,6 +1274,36 @@ mod tests {
         let buckets = parse_rate_limits(Some(&response));
         assert_eq!(buckets[0].used_percent, None);
         assert_eq!(buckets[0].remaining_percent, None);
+    }
+
+    #[test]
+    fn preserves_an_exhausted_secondary_window_and_its_reset() {
+        let response = json!({"rateLimits": {
+            "limitId": "codex",
+            "primary": {"usedPercent": 32, "windowDurationMins": 300, "resetsAt": 42},
+            "secondary": {"usedPercent": 100, "windowDurationMins": 10080, "resetsAt": 84}
+        }});
+        let buckets = parse_rate_limits(Some(&response));
+        let secondary = buckets[0].secondary.as_ref().unwrap();
+        assert_eq!(buckets[0].remaining_percent, Some(68));
+        assert_eq!(secondary.remaining_percent, Some(0));
+        assert_eq!(secondary.window_duration_mins, Some(10080));
+        assert_eq!(secondary.resets_at, Some(84));
+        let wire = serde_json::to_value(&buckets[0]).unwrap();
+        assert_eq!(wire["secondary"]["remainingPercent"], 0);
+    }
+
+    #[test]
+    fn invalid_secondary_percentage_does_not_become_available_quota() {
+        let response = json!({"rateLimits": {
+            "primary": {"usedPercent": 32},
+            "secondary": {"usedPercent": -1, "windowDurationMins": 10080}
+        }});
+        let buckets = parse_rate_limits(Some(&response));
+        assert_eq!(
+            buckets[0].secondary.as_ref().unwrap().remaining_percent,
+            None
+        );
     }
 
     #[test]

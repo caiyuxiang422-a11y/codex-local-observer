@@ -8543,3 +8543,75 @@ body.widget-route #root {
     border-color: CanvasText;
   }
 }
+
+/* Keep quota labels, numbers and the lower meter on distinct readable rails. */
+.widget-shell[data-placement="notch"].widget-shell--collapsed
+  .widget-notch--hardware
+  .widget-capsule-side--usageRemaining[data-compact-spectrum="true"]:has(.widget-capsule-meter) {
+  grid-template-rows: 18px 2px;
+}
+.widget-shell[data-placement="notch"].widget-shell--collapsed
+  .widget-notch--hardware
+  .widget-capsule-side--usageRemaining[data-compact-spectrum="true"]
+  .widget-capsule-title {
+  display: grid !important;
+  grid-template-rows: 9px 9px;
+  grid-template-columns: minmax(0, 1fr);
+  align-content: center;
+  justify-items: center;
+  gap: 0 !important;
+}
+.widget-shell[data-placement="notch"].widget-shell--collapsed
+  .widget-notch--hardware
+  .widget-capsule-side--usageRemaining[data-compact-spectrum="true"]
+  .widget-capsule-title strong,
+.widget-shell[data-placement="notch"].widget-shell--collapsed
+  .widget-notch--hardware
+  .widget-capsule-side--usageRemaining[data-compact-spectrum="true"]
+  .widget-capsule-title small {
+  width: auto !important;
+  max-width: 100%;
+  line-height: 9px;
+  flex: none;
+}
+.widget-shell[data-placement="notch"].widget-shell--collapsed
+  .widget-notch--hardware .widget-capsule-side--usageRemaining .widget-capsule-title strong {
+  font-size: 8px;
+}
+.widget-shell[data-placement="notch"].widget-shell--collapsed
+  .widget-notch--hardware .widget-capsule-side--usageRemaining .widget-capsule-title small {
+  font-size: 9px;
+}
+.widget-shell--expanded .widget-capsule-details .widget-capsule-title {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+.widget-settings-page {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+.widget-settings-page > .widget-settings {
+  position: relative;
+  inset: auto;
+  flex: 1 1 0;
+  min-height: 0;
+  max-height: none;
+  overflow-y: auto;
+}
+.widget-settings-page > .widget-settings-footer {
+  flex: 0 0 auto;
+  margin: 8px 16px 0;
+  padding: 8px 0 4px;
+}
+.widget-settings-footer > .widget-save-button {
+  position: static !important;
+  width: 100%;
+  margin: 0;
+}
+.widget-quota-windows:has(.quota-windows) { display: block; }
+.widget-quota-windows:not(:has(.quota-windows)) { display: none; }

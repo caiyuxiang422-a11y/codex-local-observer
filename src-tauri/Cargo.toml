@@ -1,6 +1,6 @@
 [package]
 name = "codex-local-observer"
-version = "0.1.0"
+version = "0.1.1"
 description = "Local-first task monitor for Codex CLI"
 authors = ["Codex Local Observer contributors"]
 edition = "2021"

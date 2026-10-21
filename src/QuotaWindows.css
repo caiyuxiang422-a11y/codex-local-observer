@@ -1,0 +1,20 @@
+.quota-windows {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  width: 100%;
+  margin-top: 9px;
+  text-align: left;
+}
+.quota-window {
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(128, 136, 154, .08);
+}
+.quota-window > div { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; }
+.quota-windows .quota-window span { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 11px; font-weight: 550; }
+.quota-windows .quota-window strong { flex-shrink: 0; margin: 0; color: inherit; font-family: inherit; font-size: 14px; line-height: 1.2; font-weight: 650; letter-spacing: 0; white-space: nowrap; overflow-wrap: normal; font-variant-numeric: tabular-nums; }
+.quota-windows .quota-window small { display: block; min-height: 0; margin-top: 4px; font-size: 10px; line-height: 1.4; color: inherit; opacity: .72; }
+.quota-window[data-exhausted="true"] { background: rgba(218, 84, 57, .09); box-shadow: inset 2px 0 #d05548; }
+.widget-quota-windows { grid-column: 1 / -1; margin-top: 0; }

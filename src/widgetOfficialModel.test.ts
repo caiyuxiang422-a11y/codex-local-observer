@@ -73,4 +73,13 @@ describe("widget official data composition", () => {
     expect(widgetSubscriptionMetric(local, account)?.label).toBe("Pro");
     expect(widgetWindowRemainingText(account)).toBe("窗口余量 78%");
   });
+
+  it("does not hide an exhausted weekly window behind available short-window quota", () => {
+    const weeklyLimited: AccountUsageSnapshot = {
+      ...account,
+      rateLimits: [{limitId: "codex", remainingPercent: 68, windowDurationMins: 300,
+        secondary: {remainingPercent: 0, windowDurationMins: 10080}}],
+    };
+    expect(widgetWindowRemainingText(weeklyLimited)).toBe("窗口余量 0%");
+  });
 });

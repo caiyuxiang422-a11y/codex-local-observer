@@ -340,7 +340,7 @@ dependencies = [
 
 [[package]]
 name = "codex-local-observer"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "battery",
  "block2",

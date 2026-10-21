@@ -39,7 +39,7 @@ import {
   subscribeToWidgetWindowHidden,
   subscribeToWidgetWindowShown,
 } from "./desktopApi";
-import { primaryRateLimit, type AccountUsageSnapshot } from "./accountModel";
+import { limitingRateLimit, primaryRateLimit, type AccountUsageSnapshot } from "./accountModel";
 import type { ProjectUsageSnapshot } from "./projectUsageModel";
 import { formatTokenCount } from "./taskModel";
 import {
@@ -92,6 +92,7 @@ import {
 } from "./macosNotchModel";
 import { mediumGlassContourPath } from "./mediumContourModel";
 import { MediumCrown, mediumCrownStatusTone } from "./MediumCrown";
+import { QuotaWindows } from "./QuotaWindows";
 import { MediumContourChrome } from "./MediumContourChrome";
 import {
   normalizeWidgetCrownPaintedPayload,
@@ -974,7 +975,7 @@ function compactMetricCopy(
       };
     case "usageRemaining":
       return {
-        label: localized(locale, "Usage 余量", "Usage remaining"),
+        label: localized(locale, "Usage 余量", "Quota left"),
         value: context.usageRemaining ?? "—",
         meterPercent: context.usageRemainingPercent,
         meterLabel: localized(locale, "官方余量", "Official remaining"),
@@ -2407,8 +2408,11 @@ export default function WidgetApp() {
   // surface never shows the previous project's name or counts while the first
   // sample for the new selection is being collected.
   useEffect(() => {
-    setSnapshot(undefined);
-    setProjectUsage(undefined);
+    // Fast local reads can finish before this effect runs. Keep a result that
+    // already belongs to the new selection instead of erasing it until the
+    // next poll, while still discarding every previous project's snapshot.
+    setSnapshot(current => current?.currentProjectPath === projectPath ? current : undefined);
+    setProjectUsage(current => current?.projectPath === projectPath ? current : undefined);
     systemMetricsRef.current = undefined;
     setSystemMetrics(undefined);
     setSystemMetricsError(undefined);
@@ -2586,7 +2590,7 @@ export default function WidgetApp() {
           `账户累计（非额度）${formatTokenCount(accountUsage.tokenActivity.lifetimeTokens)}`,
           `Account lifetime activity (not quota) ${formatTokenCount(accountUsage.tokenActivity.lifetimeTokens)}`,
         );
-  const accountRemainingPercent = primaryRateLimit(accountUsage)?.remainingPercent;
+  const accountRemainingPercent = limitingRateLimit(accountUsage)?.remainingPercent;
 
   const capsuleStatus = error
     ? localized(locale, "读取失败", "Read failed")
@@ -2606,7 +2610,9 @@ export default function WidgetApp() {
                 `${snapshot.runningTasks.tasks.length} 个运行中`,
                 `${snapshot.runningTasks.tasks.length} running`,
               )
-            : localized(locale, "空闲", "Idle");
+            : !snapshot || snapshot.runningTasks.state === "unknown" || snapshot.runningTasks.state === "unavailable"
+              ? localized(locale, "状态未知", "Status unknown")
+              : localized(locale, "空闲", "Idle");
   const selectedProjectPath = snapshot?.currentProjectPath ?? projectPath;
   const currentProjectName = selectedProjectPath
     ? projectDisplayName(selectedProjectPath)
@@ -3118,6 +3124,7 @@ export default function WidgetApp() {
           )}
 
           {settingsOpen ? (
+            <div className="widget-settings-page">
             <section className="widget-settings" aria-labelledby="widget-settings-title">
               <div className="widget-settings-heading">
                 <div>
@@ -3623,6 +3630,7 @@ export default function WidgetApp() {
                   "Usage and plan use official values first. The manual plan is only a fallback label when none is returned.",
                 )}
               </p>
+            </section>
               <footer className="widget-settings-footer">
                 <button
                   className="widget-save-button"
@@ -3635,7 +3643,7 @@ export default function WidgetApp() {
                     : localized(locale, "完成", "Done")}
                 </button>
               </footer>
-            </section>
+            </div>
           ) : (
             <div className="widget-dashboard">
               <section
@@ -3662,7 +3670,7 @@ export default function WidgetApp() {
                 <NotchVital
                   label={localized(locale, "USAGE 余量", "USAGE REMAINING")}
                   value={remainingValue}
-                  caption={localized(locale, "官方窗口比例 · 不是可换算的绝对 Token", "Official window percentage · not an absolute token balance")}
+                  caption={localized(locale, "最紧额度窗口 · 不是绝对剩余 Token", "Limiting quota window · not an absolute token balance")}
                   state={windowRemainingText ? "known" : "unknown"}
                   meterPercent={accountRemainingPercent}
                   meterLabel={localized(locale, "官方窗口余量", "Official window remaining")}
@@ -3675,6 +3683,9 @@ export default function WidgetApp() {
                   completionPercent={currentProgressPercent}
                   completionLabel={localized(locale, "已完成里程碑", "Milestone completed")}
                 />
+                <div className="widget-quota-windows">
+                  <QuotaWindows bucket={primaryRateLimit(accountUsage)} />
+                </div>
               </section>
 
               <section className="widget-system-snapshot" aria-labelledby="widget-system-title">

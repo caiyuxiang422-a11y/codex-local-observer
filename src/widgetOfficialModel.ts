@@ -1,6 +1,6 @@
 import {
   planLabel,
-  primaryRateLimit,
+  limitingRateLimit,
   type AccountUsageSnapshot,
 } from "./accountModel";
 import {
@@ -105,8 +105,7 @@ export function widgetSubscriptionMetric(
 export function widgetWindowRemainingText(
   account: AccountUsageSnapshot | undefined,
 ): string | undefined {
-  const limit = primaryRateLimit(account);
+  const limit = limitingRateLimit(account);
   if (limit?.remainingPercent === undefined) return undefined;
   return `窗口余量 ${limit.remainingPercent}%`;
 }
-

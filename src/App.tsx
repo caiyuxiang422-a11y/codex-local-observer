@@ -41,6 +41,7 @@ import {
 import {
   planLabel,
   primaryRateLimit,
+  limitingRateLimit,
   type AccountUsageSnapshot,
 } from "./accountModel";
 import {
@@ -51,7 +52,6 @@ import {
 import {
   projectUsageCaption,
   projectUsageStateLabel,
-  projectUsageValue,
   type ProjectUsageSnapshot,
 } from "./projectUsageModel";
 import {
@@ -72,6 +72,8 @@ import {
   type AppLocale,
 } from "./locale";
 import { BrandLogo } from "./BrandLogo";
+import { QuotaWindows } from "./QuotaWindows";
+import { useDialogFocus } from "./useDialogFocus";
 import WidgetApp from "./WidgetApp";
 import CrownOverlayApp from "./CrownOverlayApp";
 
@@ -831,7 +833,14 @@ function MainApp() {
   const [systemMetricsRefreshNonce, setSystemMetricsRefreshNonce] = useState(0);
   const [focusDetailsOpen, setFocusDetailsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const settingsPanelRef = useRef<HTMLElement>(null);
+  const settingsTriggerRef = useRef<HTMLButtonElement>(null);
+  useDialogFocus(settingsOpen, settingsPanelRef, settingsTriggerRef);
   const projectPathRef = useRef(projectPath);
+  const projectReadIdRef = useRef(0);
+  const projectReadInFlightRef = useRef(false);
+  const projectRefreshRef = useRef<((path: string) => Promise<void>) | undefined>(undefined);
+  const lastTaskEventCountRef = useRef(monitor.totalEventCount);
   const systemMetricsRequestIdRef = useRef(0);
   const systemMetricsRequestedPathRef = useRef<string | undefined>(undefined);
 
@@ -932,6 +941,9 @@ function MainApp() {
     // A path edit invalidates the previous snapshot. Keeping it visible would
     // make a real result look like it belongs to a different repository.
     projectPathRef.current = projectPath;
+    projectReadIdRef.current += 1;
+    projectReadInFlightRef.current = false;
+    setProjectViewLoading(false);
     setProjectViewedPath(undefined);
     setProjectStatus(undefined);
     setProjectProgress(undefined);
@@ -945,24 +957,6 @@ function MainApp() {
     systemMetricsRequestedPathRef.current = undefined;
     setProjectViewMessage(undefined);
   }, [projectPath]);
-
-  useEffect(() => {
-    const path = projectPath.trim();
-    if (!environment?.backendReady || !path || projectViewedPath !== path) return;
-    let active = true;
-    getProjectProgress({ projectPath: path })
-      .then((snapshot) => {
-        if (!active || !sameProjectPath(projectPathRef.current, path)) return;
-        setProjectProgress(snapshot);
-      })
-      .catch((error: unknown) => {
-        if (!active || !sameProjectPath(projectPathRef.current, path)) return;
-        setFocusError(`${t("项目进度", "Project progress")}: ${readableError(error)}`);
-      });
-    return () => {
-      active = false;
-    };
-  }, [environment?.backendReady, projectPath, projectViewedPath]);
 
   // System metrics are a separate local read model. They refresh on a calm
   // cadence and do not depend on Codex task events, so opening a long-running
@@ -1028,33 +1022,33 @@ function MainApp() {
     systemMetricsRefreshNonce,
   ]);
 
-  // The focus view is intentionally a single-project read model. It refreshes
-  // after task events, but the account snapshot below has a much slower cadence
-  // because it can involve a network-backed App Server request.
+  // Refresh the selected project's read model independently of account data
+  // and task events from this observer. External Codex work produces no local
+  // event here, so it needs a bounded poll and a refresh on returning to the app.
   useEffect(() => {
     const path = projectPath.trim();
-    if (!path || projectViewedPath !== path) return;
-    let active = true;
-    const timer = window.setTimeout(() => {
-      Promise.allSettled([getWidgetSnapshot({ projectPath: path }), getProjectUsage(path)])
-        .then(([snapshotResult, usageResult]) => {
-          if (!active || !sameProjectPath(projectPathRef.current, path)) return;
-          if (snapshotResult.status === "fulfilled") {
-            setFocusSnapshot(snapshotResult.value);
-            setFocusError(undefined);
-          } else {
-            setFocusError(readableError(snapshotResult.reason));
-          }
-          if (usageResult.status === "fulfilled") {
-            setProjectUsage(usageResult.value);
-          }
-        });
-    }, 180);
-    return () => {
-      active = false;
-      window.clearTimeout(timer);
+    if (!environment?.backendReady || !path || projectViewedPath !== path) return;
+    const refresh = () => {
+      if (document.visibilityState !== "hidden") void projectRefreshRef.current?.(path);
     };
-  }, [monitor.status, monitor.totalEventCount, projectPath, projectViewedPath]);
+    const interval = window.setInterval(refresh, 60_000);
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [environment?.backendReady, projectPath, projectViewedPath]);
+
+  useEffect(() => {
+    const changed = lastTaskEventCountRef.current !== monitor.totalEventCount;
+    lastTaskEventCountRef.current = monitor.totalEventCount;
+    const path = projectPath.trim();
+    if (!changed || !path || projectViewedPath !== path) return;
+    const timer = window.setTimeout(() => void projectRefreshRef.current?.(path), 180);
+    return () => window.clearTimeout(timer);
+  }, [monitor.totalEventCount, projectPath, projectViewedPath]);
 
   useEffect(() => {
     if (!environment?.backendReady) return;
@@ -1091,7 +1085,7 @@ function MainApp() {
   // for the currently selected project.
   const currentProjectStatus = projectStatus;
 
-  const focusLimit = primaryRateLimit(accountUsage);
+  const focusLimit = limitingRateLimit(accountUsage);
   const verifiedPlan = accountUsage?.planType
     ? planLabel(accountUsage.planType)
     : undefined;
@@ -1099,11 +1093,80 @@ function MainApp() {
   const projectHasBeenViewed = sameProjectPath(projectViewedPath, projectPath.trim());
 
   /**
-   * Load the selected project's read model in one explicit action. Git,
-   * progress, task history and usage are safe read paths. Test/build are not
-   * included here because package scripts may write files or access the
-   * network. The one-click observer never launches them implicitly.
+   * Commit each source as soon as it is ready. A slow billing route must not
+   * hold Git, milestones, and local tasks behind the same promise barrier.
    */
+  async function readProjectData(path: string, manual: boolean): Promise<void> {
+    if (!path || projectReadInFlightRef.current) return;
+    const requestId = ++projectReadIdRef.current;
+    projectReadInFlightRef.current = true;
+    const isCurrent = () => requestId === projectReadIdRef.current &&
+      sameProjectPath(projectPathRef.current, path);
+    const errors: string[] = [];
+    setFocusError(undefined);
+    if (manual) {
+      setProjectViewLoading(true);
+      setProjectViewedPath(path);
+      setProjectViewMessage({ chinese: "正在读取项目…", english: "Loading project…" });
+      void requestSystemMetrics(path);
+      setAccountRefreshNonce(value => value + 1);
+    }
+
+    async function load<T>(label: string, read: () => Promise<T>, apply: (value: T) => void) {
+      try {
+        const result = await read();
+        if (isCurrent()) apply(result);
+      } catch (error: unknown) {
+        if (!isCurrent()) return;
+        errors.push(label + ": " + readableError(error));
+        setFocusError(errors.join(" · "));
+      }
+    }
+
+    const reads = [
+      load(t("本地任务", "Local tasks"),
+        () => getWidgetSnapshot({ projectPath: path }), setFocusSnapshot),
+      load(t("官方项目 Token", "Official project tokens"),
+        () => getProjectUsage(path), setProjectUsage),
+      load(t("项目进度", "Project progress"),
+        () => getProjectProgress({ projectPath: path }), setProjectProgress),
+      load("Git", () => getProjectStatus({ projectPath: path, kind: "git" }), result => {
+        setProjectStatus(previous => previous?.projectPath === result.projectPath
+          ? { ...result, source: "local.project_status.merged", confidence: "medium", checks: previous.checks }
+          : result);
+      }),
+    ];
+    if (manual) {
+      const parts = path.split(/[\\/]/).filter(Boolean);
+      const workspaceId = focusProjectChoices.find(workspace => workspace.path === path)?.id ?? newWorkspaceId();
+      reads.push(
+        load(t("项目选择", "Project selection"), () => saveWorkspace({
+          workspace: { id: workspaceId, name: parts[parts.length - 1] ?? t("当前项目", "Current project"), path },
+          makeActive: true,
+        }), setWorkspaceSnapshot),
+        load(t("项目概览同步", "Project Overview sync"), () => setWidgetProject(path), () => {}),
+      );
+    }
+    try {
+      await Promise.all(reads);
+      if (!isCurrent()) return;
+      setProjectViewMessage(errors.length ? {
+        chinese: "读取完成，部分数据源暂不可用；已返回的数据仍然可查看。",
+        english: "Loaded with some sources unavailable. Available data is shown.",
+      } : {
+        chinese: "项目数据已更新；各指标保留自己的来源和更新时间。",
+        english: "Project data updated. Each metric retains its source and update time.",
+      });
+    } finally {
+      if (isCurrent()) {
+        projectReadInFlightRef.current = false;
+        setProjectViewLoading(false);
+      }
+    }
+  }
+
+  projectRefreshRef.current = path => readProjectData(path, false);
+
   async function viewSelectedProject() {
     const path = projectPath.trim();
     if (!path) {
@@ -1115,170 +1178,8 @@ function MainApp() {
       return;
     }
     if (active || projectViewLoading) return;
-
-    // Pin the request identity before any async work. This also removes
-    // trailing/leading whitespace from the comparison used when results land.
     projectPathRef.current = path;
-    setProjectViewLoading(true);
-    setFocusError(undefined);
-    setProjectViewMessage(undefined);
-    setProjectViewMessage({
-      chinese: "正在读取项目…",
-      english: "Loading project…",
-    });
-    // Start the cheap local snapshot immediately. It is intentionally
-    // independent from project usage/App Server calls, so the five machine
-    // cards can become useful even when official history is slow or missing.
-    void requestSystemMetrics(path);
-    // Viewing a project is the user's explicit refresh action.  Re-read the
-    // account snapshot as well so the headline cards are from one moment.
-    setAccountRefreshNonce((value) => value + 1);
-
-    const pathParts = path.split(/[\\/]/).filter(Boolean);
-    const fallbackName = pathParts[pathParts.length - 1] ?? t("当前项目", "Current project");
-    const workspaceId =
-      focusProjectChoices.find((workspace) => workspace.path === path)?.id ??
-      newWorkspaceId();
-
-    const [
-      workspaceResult,
-      widgetProjectResult,
-      snapshotResult,
-      projectUsageResult,
-      progressResult,
-      statusResult,
-    ] =
-      await Promise.allSettled([
-        // Persist the selection as the active workspace so the floating note
-        // observes the same project instead of falling back to another path.
-        saveWorkspace({
-          workspace: { id: workspaceId, name: fallbackName, path },
-          makeActive: true,
-        }),
-        // Update an existing sticky note without forcing it to open or steal
-        // focus. A newly-created note reads the same native state later.
-        setWidgetProject(path),
-        getWidgetSnapshot({ projectPath: path }),
-        getProjectUsage(path),
-        getProjectProgress({ projectPath: path }),
-        // Git is read-only. Test/build remain manual to avoid silently
-        // executing arbitrary package.json scripts.
-        getProjectStatus({ projectPath: path, kind: "git" }),
-      ]);
-
-    if (sameProjectPath(projectPathRef.current, path)) {
-      const errors: string[] = [];
-      if (workspaceResult.status === "fulfilled") {
-        setWorkspaceSnapshot(workspaceResult.value);
-      } else {
-        errors.push(`${t("项目选择未保存", "Project selection was not saved")}: ${readableError(workspaceResult.reason)}`);
-      }
-      if (widgetProjectResult.status === "rejected") {
-        errors.push(`${t("项目概览同步", "Project Overview sync")}: ${readableError(widgetProjectResult.reason)}`);
-      }
-      if (snapshotResult.status === "fulfilled") {
-        setFocusSnapshot(snapshotResult.value);
-      } else {
-        const message = readableError(snapshotResult.reason);
-        setFocusError(message);
-        errors.push(`${t("任务与 Token", "Tasks and tokens")}: ${message}`);
-      }
-      if (projectUsageResult.status === "fulfilled") {
-        setProjectUsage(projectUsageResult.value);
-      } else {
-        const message = readableError(projectUsageResult.reason);
-        errors.push(`${t("官方项目 Token", "Official project tokens")}: ${message}`);
-      }
-      if (progressResult.status === "fulfilled") {
-        setProjectProgress(progressResult.value);
-      } else {
-        const message = readableError(progressResult.reason);
-        errors.push(`${t("项目进度", "Project progress")}: ${message}`);
-      }
-      if (statusResult.status === "fulfilled") {
-        setProjectStatus((previous) => {
-          if (!previous || previous.projectPath !== statusResult.value.projectPath) {
-            return statusResult.value;
-          }
-          return {
-            ...statusResult.value,
-            source: "local.project_status.merged",
-            confidence: "medium",
-            checks: previous.checks,
-          };
-        });
-      } else {
-        const message = readableError(statusResult.reason);
-        errors.push(`Git: ${message}`);
-      }
-      if (errors.length > 0) {
-        setFocusError(errors.join(" · "));
-        setProjectViewMessage({
-          chinese: `读取完成，但有 ${errors.length} 项数据不可用`,
-          english: `Project loaded, but ${errors.length} data source${errors.length === 1 ? " is" : "s are"} unavailable`,
-        });
-      }
-      if (
-          errors.length === 0 &&
-          widgetProjectResult.status === "fulfilled" &&
-          statusResult.status === "fulfilled" &&
-        snapshotResult.status === "fulfilled" &&
-        projectUsageResult.status === "fulfilled" &&
-        progressResult.status === "fulfilled"
-      ) {
-        const hasTaskHistory =
-          snapshotResult.value.currentProjectUsage.state !== "unknown" ||
-          snapshotResult.value.runningTasks.tasks.length > 0 ||
-          snapshotResult.value.failedTasks.tasks.length > 0;
-        const buildSummary = (summaryLocale: AppLocale) => {
-          const translate = (chinese: string, english: string) =>
-            localized(summaryLocale, chinese, english);
-          const git = statusResult.value.git;
-          const gitText =
-            git.status === "available"
-              ? translate(
-                  `Git ${git.branch ?? "已连接"} · 未提交 ${git.uncommittedFiles}`,
-                  `Git ${git.branch ?? "connected"} · ${git.uncommittedFiles} uncommitted`,
-                )
-              : git.status === "notRepository"
-                ? translate("不是 Git 仓库", "Not a Git repository")
-                : translate("Git 状态未知", "Git status unknown");
-          const runningCount = snapshotResult.value.runningTasks.tasks.length;
-          const taskText = runningCount > 0
-            ? translate(
-                `运行中 ${runningCount} 个任务`,
-                `${runningCount} running task${runningCount === 1 ? "" : "s"}`,
-              )
-            : translate("当前无运行任务", "No running tasks");
-          const taskDataText = hasTaskHistory
-            ? translate("已加载本工具任务记录", "Local task records loaded")
-            : translate("暂无本工具任务/Token记录", "No local task or token records yet");
-          const officialUsageText = projectUsageResult.value.totalTokens === undefined
-            ? translate("官方项目 Token 暂不可回溯", "Historical official project tokens are unavailable")
-            : translate(
-                `官方项目 Token ${projectUsageValue(projectUsageResult.value)}`,
-                `Official project tokens ${new Intl.NumberFormat(intlLocale(summaryLocale)).format(projectUsageResult.value.totalTokens)}`,
-              );
-          const milestoneCount = progressResult.value.milestones.length;
-          const progressText = milestoneCount > 0
-            ? translate(
-                `已加载 ${milestoneCount} 个里程碑`,
-                `${milestoneCount} milestone${milestoneCount === 1 ? "" : "s"} loaded`,
-              )
-            : translate("尚未设置里程碑", "No milestones set");
-          return `${translate("已读取", "Loaded")}: ${gitText} · ${taskText} · ${officialUsageText} · ${taskDataText} · ${progressText}`;
-        };
-        setProjectViewMessage({
-          chinese: buildSummary("zh-CN"),
-          english: buildSummary("en-US"),
-        });
-      }
-    }
-
-    setProjectViewLoading(false);
-    if (sameProjectPath(projectPathRef.current, path)) {
-      setProjectViewedPath(path);
-    }
+    await readProjectData(path, true);
   }
 
   async function refreshAdvanced() {
@@ -1398,7 +1299,7 @@ function MainApp() {
 
   return (
     <div className="app-shell">
-      <header className="topbar">
+      <header className="topbar" inert={settingsOpen}>
         <div className="brand-lockup">
           <BrandLogo size={36} />
           <div>
@@ -1408,6 +1309,7 @@ function MainApp() {
         </div>
         <div className="topbar-actions">
           <button
+            ref={settingsTriggerRef}
             className={`button button--quiet button--compact settings-trigger${settingsOpen ? " settings-trigger--active" : ""}`}
             type="button"
             onClick={() => setSettingsOpen((value) => !value)}
@@ -1455,6 +1357,8 @@ function MainApp() {
             onClick={() => setSettingsOpen(false)}
           />
           <aside
+            ref={settingsPanelRef}
+            tabIndex={-1}
             className="settings-popover"
             id="settings-diagnostics-panel"
             aria-label={t("设置与高级诊断", "Settings and advanced diagnostics")}
@@ -1600,7 +1504,7 @@ function MainApp() {
         </div>
       )}
 
-      <main className="workspace">
+      <main className="workspace" inert={settingsOpen}>
         <section className="intro" aria-labelledby="page-title">
           <div>
             <p className="step-label">{t("当前项目 · 实时概览", "CURRENT PROJECT · LIVE OVERVIEW")}</p>
@@ -1774,7 +1678,7 @@ function MainApp() {
               <small>{t("官方账户 usage 活动总量；不是额度上限，也不等于当前项目", "Total activity returned by official account usage; neither a quota nor this project’s usage")}</small>
             </article>
             <article className="focus-summary-card focus-summary-card--account">
-              <span>{t("Codex 主窗口余量", "Codex primary window remaining")}</span>
+              <span>{t("Codex 额度余量", "Codex quota remaining")}</span>
               <strong>
                 {accountRemainingValue(accountUsage, focusLimit, accountLoading, accountError, locale)}
               </strong>
@@ -1792,7 +1696,7 @@ function MainApp() {
                 <div
                   className="focus-summary-meter"
                   role="progressbar"
-                  aria-label={t("Codex 主窗口剩余比例", "Codex primary window remaining percentage")}
+                  aria-label={t("最紧额度窗口剩余比例", "Remaining percentage of the limiting quota window")}
                   aria-valuemin={0}
                   aria-valuemax={100}
                   aria-valuenow={focusLimit.remainingPercent}
@@ -1804,6 +1708,7 @@ function MainApp() {
                   />
                 </div>
               )}
+              <QuotaWindows bucket={primaryRateLimit(accountUsage)} />
             </article>
           </div>
 
@@ -1880,15 +1785,15 @@ function MainApp() {
             <div>
               <span>{t("项目状态", "Project status")}</span>
               <strong>
-                {projectViewLoading
-                  ? t("读取中…", "Loading…")
-                  : currentProjectStatus?.git.status === "available"
+                {currentProjectStatus?.git.status === "available"
                     ? currentProjectStatus.git.branch ?? t("已连接 Git", "Git connected")
                     : currentProjectStatus?.git.status === "notRepository"
                       ? t("不是 Git 仓库", "Not a Git repository")
                       : currentProjectStatus
                         ? t("状态未知", "Status unknown")
-                        : t("尚未查看", "Not viewed")}
+                        : projectViewLoading
+                          ? t("读取中…", "Loading…")
+                          : t("尚未查看", "Not viewed")}
               </strong>
             </div>
             <div>

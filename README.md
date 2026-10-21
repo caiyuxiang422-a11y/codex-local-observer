@@ -23,6 +23,9 @@ an end-user release.
   returns it. Missing historical token data remains “unavailable”, never zero.
 - Official rate-limit window percentages, reset times, credits, and plan data
   when exposed by the local App Server.
+- Both primary and secondary quota windows, with the tightest reported window
+  used in summaries. Project sources load independently and refresh while the
+  main window is visible.
 - Read-only CPU, memory, storage, network, and battery context useful while
   coding.
 - Compact, summary, and detailed views, either attached to the macOS camera
@@ -149,6 +152,9 @@ docs/decisions/         Architecture decision records
 Read [CONTRIBUTING.md](CONTRIBUTING.md) and the
 [Code of Conduct](CODE_OF_CONDUCT.md). New integrations must preserve the
 project's local-first, least-privilege, source-labelled data model.
+
+See the [maintenance process](docs/maintenance.md) and [changelog](CHANGELOG.md)
+for the scope and verification of ongoing updates.
 
 ## License
 
